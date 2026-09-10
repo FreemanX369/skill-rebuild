@@ -30,9 +30,11 @@ def detect_archive_type(filepath: Path) -> str:
     """Detect Java archive type from magic bytes and contents."""
     data = filepath.read_bytes()[:8]
 
-    # Class file: 0xCAFEBABE
+    # Class file: 0xCAFEBABE (major version >= 45 to disambiguate from Mach-O fat binary)
     if data[:4] == b'\xca\xfe\xba\xbe':
-        return 'class'
+        if len(data) >= 8 and struct.unpack('>H', data[6:8])[0] >= 45:
+            return 'class'
+        return 'unknown'
 
     # ZIP-based (JAR/WAR/EAR/APK)
     if data[:2] == b'PK':

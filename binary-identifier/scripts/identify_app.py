@@ -5,6 +5,7 @@ Identifies programming language, compiler, and potential packers/encryption.
 """
 import argparse
 import re
+import struct
 import sys
 from pathlib import Path
 
@@ -52,7 +53,7 @@ def identify(filepath):
     p = Path(filepath)
     if not p.exists():
         print(f"[!] Error: {filepath} not found.")
-        return
+        return None
 
     print(f"[*] Analyzing Binary: {p.name} ({p.stat().st_size:,} bytes)")
     data = p.read_bytes()
@@ -88,11 +89,46 @@ def identify(filepath):
         if 'Python' not in results['Language/Compiler']:
              results['Language/Compiler'].append('Python (Nuitka)')
 
-    # 3b. Java archive / class file detection
+    # 3b. Binary format & Java archive / class file detection
     if data[:4] == b'\xca\xfe\xba\xbe':
-        if 'Java' not in results['Language/Compiler']:
-            results['Language/Compiler'].append('Java')
-        results['Misc/Indicators'].append('Java class file (0xCAFEBABE)')
+        is_java = False
+        is_macho_fat = False
+        if len(data) >= 8:
+            nfat_arch = struct.unpack('>I', data[4:8])[0]
+            minor, major = struct.unpack('>HH', data[4:8])
+            # Mach-O universal (fat) binary: nfat_arch is arch count (typically 1-4, <= 30)
+            if 1 <= nfat_arch <= 30:
+                if len(data) >= 8 + nfat_arch * 20:
+                    cputype, cpusubtype, offset, size, align = struct.unpack('>IIIII', data[8:28])
+                    if offset + 4 <= len(data) and data[offset:offset+4] in (
+                        b'\xfe\xed\xfa\xce', b'\xce\xfa\xed\xfe',
+                        b'\xfe\xed\xfa\xcf', b'\xcf\xfa\xed\xfe'
+                    ):
+                        is_macho_fat = True
+                if not is_macho_fat and major < 45:
+                    is_macho_fat = True
+
+            if not is_macho_fat and major >= 45:
+                is_java = True
+
+        if is_java:
+            if 'Java' not in results['Language/Compiler']:
+                results['Language/Compiler'].append('Java')
+            results['Misc/Indicators'].append('Java class file (0xCAFEBABE)')
+        elif is_macho_fat:
+            results['Misc/Indicators'].append('Mach-O universal (fat) binary')
+        else:
+            results['Misc/Indicators'].append('0xCAFEBABE signature (ambiguous Java / Mach-O fat binary)')
+    elif data[:4] in (b'\xcf\xfa\xed\xfe', b'\xfe\xed\xfa\xcf'):
+        results['Misc/Indicators'].append('Mach-O 64-bit binary')
+    elif data[:4] in (b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xce'):
+        results['Misc/Indicators'].append('Mach-O 32-bit binary')
+    elif data[:4] in (b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca', b'\xbe\xba\xfe\xca'):
+        results['Misc/Indicators'].append('Mach-O universal (fat) binary')
+    elif data[:4] == b'\x7fELF':
+        results['Misc/Indicators'].append('ELF executable (Linux/Unix)')
+    elif data[:2] == b'MZ':
+        results['Misc/Indicators'].append('PE executable (Windows)')
     elif data[:2] == b'PK':
         import zipfile, io
         try:
@@ -144,6 +180,8 @@ def identify(filepath):
             print("Recommendation: Use 'java-decompiler' with JADX for APK decompilation.")
         else:
             print("Recommendation: Use 'java-decompiler' (CFR/Procyon/FernFlower) for decompilation.")
+
+    return results
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

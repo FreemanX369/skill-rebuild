@@ -1,0 +1,50 @@
+name: Test TIP-026R3 Runtime Forensics
+
+on:
+  push:
+    branches: [ feat/tip026r3-mt5-runtime-forensics ]
+    paths:
+      - 'mt5-runtime-reconstruction/**'
+      - '.github/workflows/test-tip026r3-runtime-forensics.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check pytest
+      - name: Compile Python modules
+        run: |
+          python -m py_compile mt5-runtime-reconstruction/scripts/authority.py
+          python -m py_compile mt5-runtime-reconstruction/scripts/compare_snapshots.py
+          python -m py_compile mt5-runtime-reconstruction/scripts/runtime_capture_windows.py
+      - name: Unit and contract tests
+        run: pytest -q mt5-runtime-reconstruction/tests
+
+  windows-static:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile Windows capture helper
+        shell: pwsh
+        run: |
+          python -m py_compile mt5-runtime-reconstruction/scripts/runtime_capture_windows.py
+          python -m py_compile mt5-runtime-reconstruction/scripts/authority.py
+      - name: Enforce no arbitrary target CLI
+        shell: pwsh
+        run: |
+          $p='mt5-runtime-reconstruction/scripts/runtime_capture_windows.py'
+          $text=Get-Content $p -Raw
+          foreach($bad in @('add_argument("--pid"','add_argument("--process-name"','add_argument("--address"','add_argument("--command"')){
+            if($text.Contains($bad)){ throw "Forbidden capture surface: $bad" }
+          }

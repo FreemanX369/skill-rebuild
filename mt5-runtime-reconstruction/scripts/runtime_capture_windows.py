@@ -31,6 +31,7 @@ from authority import (
 PROCESS_VM_READ = 0x0010
 PROCESS_DUP_HANDLE = 0x0040
 PROCESS_QUERY_INFORMATION = 0x0400
+STILL_ACTIVE = 259
 
 PSS_CAPTURE_VA_CLONE = 0x00000001
 PSS_CAPTURE_THREADS = 0x00000080
@@ -54,6 +55,9 @@ MINIDUMP_WITH_CODE_SEGS = 0x00002000
 MINIDUMP_WITH_PRIVATE_WRITE_COPY_MEMORY = 0x00010000
 MINIDUMP_IGNORE_INACCESSIBLE_MEMORY = 0x00020000
 
+GENERIC_WRITE = 0x40000000
+CREATE_ALWAYS = 2
+FILE_ATTRIBUTE_NORMAL = 0x80
 PAGE_SIZE = 4096
 
 
@@ -78,6 +82,99 @@ class MEMORY_BASIC_INFORMATION(ctypes.Structure):
     ]
 
 
+def configure_apis(kernel32, dbghelp) -> None:
+    """Declare x64-safe WinAPI signatures; ctypes defaults would truncate HANDLE values."""
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+
+    kernel32.GetProcessId.argtypes = [wintypes.HANDLE]
+    kernel32.GetProcessId.restype = wintypes.DWORD
+
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+
+    kernel32.GetProcessTimes.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(FILETIME),
+        ctypes.POINTER(FILETIME),
+        ctypes.POINTER(FILETIME),
+        ctypes.POINTER(FILETIME),
+    ]
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+
+    kernel32.PssCaptureSnapshot.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    kernel32.PssCaptureSnapshot.restype = wintypes.DWORD
+
+    kernel32.PssQuerySnapshot.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    kernel32.PssQuerySnapshot.restype = wintypes.DWORD
+
+    kernel32.PssFreeSnapshot.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+    kernel32.PssFreeSnapshot.restype = wintypes.DWORD
+
+    kernel32.VirtualQueryEx.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_void_p,
+        ctypes.POINTER(MEMORY_BASIC_INFORMATION),
+        ctypes.c_size_t,
+    ]
+    kernel32.VirtualQueryEx.restype = ctypes.c_size_t
+
+    kernel32.ReadProcessMemory.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    kernel32.ReadProcessMemory.restype = wintypes.BOOL
+
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+
+    dbghelp.MiniDumpWriteDump.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    dbghelp.MiniDumpWriteDump.restype = wintypes.BOOL
+
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as fh:
@@ -100,16 +197,16 @@ def load_key() -> bytes:
         raise AuthorityError("invalid runtime authority key encoding") from exc
 
 
-def query_live_process(kernel32, pid: int):
-    rights = PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_DUP_HANDLE
-    handle = kernel32.OpenProcess(rights, False, pid)
-    if not handle:
-        raise OSError(ctypes.get_last_error(), "OpenProcess failed")
+def query_process_facts(kernel32, handle) -> tuple[str, int]:
+    exit_code = wintypes.DWORD(0)
+    if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+        raise OSError(ctypes.get_last_error(), "GetExitCodeProcess failed")
+    if exit_code.value != STILL_ACTIVE:
+        raise AuthorityError("bound testing agent is no longer running")
 
     buf = ctypes.create_unicode_buffer(32768)
     size = wintypes.DWORD(len(buf))
     if not kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
-        kernel32.CloseHandle(handle)
         raise OSError(ctypes.get_last_error(), "QueryFullProcessImageNameW failed")
 
     creation = FILETIME()
@@ -117,12 +214,28 @@ def query_live_process(kernel32, pid: int):
     kernel_ft = FILETIME()
     user_ft = FILETIME()
     if not kernel32.GetProcessTimes(
-        handle, ctypes.byref(creation), ctypes.byref(exit_ft), ctypes.byref(kernel_ft), ctypes.byref(user_ft)
+        handle,
+        ctypes.byref(creation),
+        ctypes.byref(exit_ft),
+        ctypes.byref(kernel_ft),
+        ctypes.byref(user_ft),
     ):
-        kernel32.CloseHandle(handle)
         raise OSError(ctypes.get_last_error(), "GetProcessTimes failed")
 
-    return handle, buf.value, filetime_to_int(creation)
+    return buf.value, filetime_to_int(creation)
+
+
+def open_bound_process(kernel32, pid: int):
+    rights = PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_DUP_HANDLE
+    handle = kernel32.OpenProcess(rights, False, pid)
+    if not handle:
+        raise OSError(ctypes.get_last_error(), "OpenProcess failed")
+    try:
+        image_path, creation_time = query_process_facts(kernel32, handle)
+        return handle, image_path, creation_time
+    except Exception:
+        kernel32.CloseHandle(handle)
+        raise
 
 
 def capture_snapshot(kernel32, process_handle):
@@ -134,7 +247,10 @@ def capture_snapshot(kernel32, process_handle):
 
     clone_info = PSS_VA_CLONE_INFORMATION()
     rc = kernel32.PssQuerySnapshot(
-        snapshot, PSS_QUERY_VA_CLONE_INFORMATION, ctypes.byref(clone_info), ctypes.sizeof(clone_info)
+        snapshot,
+        PSS_QUERY_VA_CLONE_INFORMATION,
+        ctypes.byref(clone_info),
+        ctypes.sizeof(clone_info),
     )
     if rc != 0 or not clone_info.VaCloneHandle:
         kernel32.PssFreeSnapshot(kernel32.GetCurrentProcess(), snapshot)
@@ -169,7 +285,10 @@ def dump_private_pages(kernel32, clone_handle, out_dir: Path) -> tuple[int, int]
         mbi = MEMORY_BASIC_INFORMATION()
         while address < max_address:
             got = kernel32.VirtualQueryEx(
-                clone_handle, ctypes.c_void_p(address), ctypes.byref(mbi), ctypes.sizeof(mbi)
+                clone_handle,
+                ctypes.c_void_p(address),
+                ctypes.byref(mbi),
+                ctypes.sizeof(mbi),
             )
             if not got:
                 break
@@ -202,7 +321,11 @@ def dump_private_pages(kernel32, clone_handle, out_dir: Path) -> tuple[int, int]
                     buf = ctypes.create_string_buffer(want)
                     read = ctypes.c_size_t(0)
                     ok = kernel32.ReadProcessMemory(
-                        clone_handle, ctypes.c_void_p(page), buf, want, ctypes.byref(read)
+                        clone_handle,
+                        ctypes.c_void_p(page),
+                        buf,
+                        want,
+                        ctypes.byref(read),
                     )
                     if ok and read.value > 0:
                         data = buf.raw[: read.value]
@@ -255,12 +378,15 @@ def minidump_flags(profile: str) -> int:
 
 
 def write_minidump(kernel32, dbghelp, clone_handle, profile: str, path: Path) -> None:
-    GENERIC_WRITE = 0x40000000
-    CREATE_ALWAYS = 2
-    FILE_ATTRIBUTE_NORMAL = 0x80
     invalid_handle = ctypes.c_void_p(-1).value
     hfile = kernel32.CreateFileW(
-        str(path), GENERIC_WRITE, 0, None, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, None
+        str(path),
+        GENERIC_WRITE,
+        0,
+        None,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        None,
     )
     if hfile == invalid_handle:
         raise OSError(ctypes.get_last_error(), "CreateFileW failed")
@@ -314,6 +440,7 @@ def main() -> int:
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     dbghelp = ctypes.WinDLL("Dbghelp", use_last_error=True)
+    configure_apis(kernel32, dbghelp)
 
     process_handle = None
     snapshot = None
@@ -321,7 +448,7 @@ def main() -> int:
     started_at = datetime.now(timezone.utc)
 
     try:
-        process_handle, image_path, creation_time = query_live_process(kernel32, record.agent_pid)
+        process_handle, image_path, creation_time = open_bound_process(kernel32, record.agent_pid)
         validate_live_binding(
             record,
             observed_pid=record.agent_pid,
@@ -340,8 +467,8 @@ def main() -> int:
         dump_path = out_dir / "runtime.dmp"
         write_minidump(kernel32, dbghelp, clone_handle, args.profile, dump_path)
 
-        # Revalidate against the original process after capture.
-        _, image_after, creation_after = query_live_process(kernel32, record.agent_pid)
+        # Post-capture revalidation uses the original bound handle; no new PID lookup/open occurs.
+        image_after, creation_after = query_process_facts(kernel32, process_handle)
         validate_live_binding(
             record,
             observed_pid=record.agent_pid,
@@ -367,7 +494,7 @@ def main() -> int:
             "capture_started_at": started_at.isoformat().replace("+00:00", "Z"),
             "capture_completed_at": completed_at.isoformat().replace("+00:00", "Z"),
             "capture_duration_ms": int((time.perf_counter() - started) * 1000),
-            "helper_version": "1.0.0-prototype",
+            "helper_version": "1.0.1-prototype",
             "helper_sha256": sha256_file(helper_path),
             "dump_sha256": sha256_file(dump_path),
             "dump_bytes": dump_path.stat().st_size,

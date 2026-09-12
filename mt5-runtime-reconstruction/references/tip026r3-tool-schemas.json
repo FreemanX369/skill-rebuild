@@ -1,0 +1,69 @@
+{
+  "proposed_runtime": {
+    "version": "0.2.32",
+    "bridge_build": "TIP-026R3",
+    "result_schema": "1.4",
+    "server_tool_count": 48,
+    "model_visible_tool_count": 47,
+    "app_only_tools": [
+      "import_ex5_authorized_file"
+    ],
+    "runtime_capture_schema": "1.0",
+    "runtime_capture_transport": "job-bound/pss-minidump"
+  },
+  "tools": [
+    {
+      "name": "capture_runtime_snapshot",
+      "description": "Capture an immutable runtime-forensics snapshot for the exact testing agent bound to a running VibeMQL5 Strategy Tester job. The server resolves the agent process internally; callers cannot provide a PID, address or command.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["job_id", "profile"],
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "pattern": "^BT-[A-Za-z0-9-]+$"
+          },
+          "profile": {
+            "type": "string",
+            "enum": ["private", "miniplus", "full"]
+          },
+          "label": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+          }
+        }
+      }
+    },
+    {
+      "name": "compare_runtime_snapshots",
+      "description": "Compare two stored runtime captures by page/state evidence. Operates only on immutable capture IDs and never accesses a live process.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["capture_a", "capture_b", "mode"],
+        "properties": {
+          "capture_a": {
+            "type": "string",
+            "pattern": "^RTC-[A-Za-z0-9-]+$"
+          },
+          "capture_b": {
+            "type": "string",
+            "pattern": "^RTC-[A-Za-z0-9-]+$"
+          },
+          "mode": {
+            "type": "string",
+            "enum": ["delta", "target-control"]
+          },
+          "known_values": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "number"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

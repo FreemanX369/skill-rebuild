@@ -24,6 +24,7 @@ jobs:
         run: |
           python -m py_compile mt5-runtime-reconstruction/scripts/authority.py
           python -m py_compile mt5-runtime-reconstruction/scripts/compare_snapshots.py
+          python -m py_compile mt5-runtime-reconstruction/scripts/scan_known_values.py
           python -m py_compile mt5-runtime-reconstruction/scripts/runtime_capture_windows.py
           python -m py_compile mt5-runtime-reconstruction/scripts/tunnel_adapter_reference.py
       - name: Unit and contract tests
@@ -42,6 +43,7 @@ jobs:
           python -m py_compile mt5-runtime-reconstruction/scripts/runtime_capture_windows.py
           python -m py_compile mt5-runtime-reconstruction/scripts/authority.py
           python -m py_compile mt5-runtime-reconstruction/scripts/tunnel_adapter_reference.py
+          python -m py_compile mt5-runtime-reconstruction/scripts/scan_known_values.py
       - name: Enforce no arbitrary target CLI
         shell: pwsh
         run: |

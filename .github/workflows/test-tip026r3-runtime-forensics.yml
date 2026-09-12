@@ -29,6 +29,19 @@ jobs:
           python -m py_compile mt5-runtime-reconstruction/scripts/tunnel_adapter_reference.py
       - name: Unit and contract tests
         run: pytest -q mt5-runtime-reconstruction/tests
+      - name: Write package provenance
+        run: |
+          printf 'REPOSITORY=FreemanX369/skill-rebuild\nHEAD=%s\nBRANCH=feat/tip026r3-mt5-runtime-forensics\nCI_RUN=%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" > TIP026R3-PROVENANCE.txt
+      - name: Upload VPS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: TIP026R3-MT5-Runtime-Forensics
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            mt5-runtime-reconstruction
+            .github/workflows/test-tip026r3-runtime-forensics.yml
+            TIP026R3-PROVENANCE.txt
 
   windows-static:
     runs-on: windows-latest
